@@ -1,58 +1,61 @@
-# Your task
+# ArmorHQ Sales Dashboard
 
-ArmorHQ has a customer named Dana. She's the head of sales at a 200-person inside sales team and she pays us a lot of money. The last time her account manager talked to her, she said:
+Built for Dana, Head of Sales — answers two questions at a glance:
+1. Are we getting better or worse week to week?
+2. Who do I call Monday morning?
 
-> "I don't need another spreadsheet. I just want to know — week to week — whether my agents are getting better or worse, and who I should be talking to on Monday morning. Right now I'm guessing."
+## What's on the dashboard
 
-Build her that dashboard at `/`.
+| Section | What it shows |
+|---|---|
+| **Connected Calls (Last 7 Days)** | Dana's primary KPI — live query, rolling window, with WoW % change |
+| **Prior Week Connected** | Baseline for WoW comparison |
+| **Top Performers** | 3 agents with most connected calls this week |
+| **Monday Morning — Needs Attention** | Agents who dropped >20% WoW or had <5 connected calls |
+| **Team Summary** | All teams ranked by connected calls, with connect rate |
 
-The data is already in your local database. Two tables, `agents` and `calls`. Around 3,000 calls across 12 agents over the last three weeks. Schema in `schema.sql`. Everything you query has to go through `src/lib/db.ts`.
+## Architecture decisions
 
-What goes on the dashboard is up to you. We hire people who can decide.
+- **Server components only** — no client JS needed. `revalidate = 0` forces fresh DB reads on every request.
+- **`src/lib/queries.ts` is the single data layer.** All SQL lives there; routes and pages call functions, not `getDb()` directly.
+- **Recursive CTEs for daily fill** — SQLite doesn't have a `generate_series`, so `WITH RECURSIVE dates(d)` fills zero-call days so the API always returns exactly 28/14 rows.
+- **No charting library added** — the ask was clean and functional. Tables communicate trends clearly without a bundle hit.
 
-## Two non-negotiables
+## API endpoints
 
-1. **The number Dana checks every Monday.** She asks her operations lead "how many calls did we connect last week?" That number — calls whose `outcome` is `connected` and whose `started_at` falls within the rolling 7 days from right now — must appear clearly somewhere on the dashboard, and must come from a live query against the database. If it's wrong or hardcoded, the rest doesn't matter.
+All endpoints return live data and set `Cache-Control: no-store`.
 
-2. **Ship the reporting API.** Dana's account manager and the customer success team need machine-readable access to the same data the dashboard shows, in four shapes. All four endpoints are live-queried, return JSON unless noted, and follow the error format below.
+| Endpoint | Description |
+|---|---|
+| `GET /api/weekly-digest` | 28 days of daily stats + top 3 agents |
+| `GET /api/weekly-digest.csv` | Same daily data as CSV for Google Sheets |
+| `GET /api/agents/[id]/scorecard` | One agent's 14-day history and totals |
+| `GET /api/teams/[name]/summary` | One team's 7-day roll-up (URL-encode spaces) |
 
-   **`/api/weekly-digest`** — last 28 days of overall activity. Returns:
-   - `data`: 28 entries, oldest first. Each: `date` (YYYY-MM-DD), `connected_count` (int), `total_count` (int), `by_team` (object mapping team name to connected calls that day).
-   - `top_agents`: 3 entries — the three agents with the most connected calls in the last 7 days. Each: `name`, `team`, `connected_count`.
-   - `meta`: `{ "generated_at": ISO 8601 string, "window_start": YYYY-MM-DD, "window_end": YYYY-MM-DD }`.
+Example: `/api/teams/West%20Coast/summary`
 
-   **`/api/weekly-digest.csv`** — same daily data as a CSV file the customer success team drops into Google Sheets. Columns: `date`, `connected_count`, `total_count`, `top_team`, `top_team_connects`. Header row required. `Content-Type: text/csv`. Team names can contain spaces — escape correctly.
+404 responses use `{ "error": "agent_not_found", "id": "..." }` / `{ "error": "team_not_found", "name": "..." }`.
 
-   **`/api/agents/[id]/scorecard`** — one agent's last 14 days. Returns:
-   - `agent`: `{ "id", "name", "team", "hire_date" }`.
-   - `last_14_days`: 14 entries, oldest first. Each: `date`, `connected_count`, `total_count`.
-   - `totals`: `{ "connected_last_7", "connected_prior_7", "connect_rate_last_7" }` (rate is 0–1).
-   - `meta`: same shape as above.
-   - 404 if the id doesn't match an agent. Error body: `{ "error": "agent_not_found", "id": "<the id>" }`.
+## Running locally
 
-   **`/api/teams/[name]/summary`** — one team's roll-up for the last 7 days. Team names in the URL come URL-encoded (e.g. `West%20Coast`). Returns:
-   - `team`: `{ "name", "agent_count" }`.
-   - `last_7_days`: `{ "connected_count", "total_count", "connect_rate" }`.
-   - `agents`: array of `{ "id", "name", "connected_count", "total_count" }`, sorted descending by `connected_count`.
-   - `meta`: same shape.
-   - 404 if the team has no agents. Error body: `{ "error": "team_not_found", "name": "<the name>" }`.
+```bash
+node --version   # must be >=22.5.0
+pnpm install
+pnpm seed        # populates data.db
+pnpm dev         # http://localhost:3000
+```
 
-   **All four endpoints set `Cache-Control: no-store`** (numbers are always live).
-   **All error responses set the appropriate HTTP status code** (404 for the not-found cases above; 400 for malformed input if you encounter any).
-   **Don't repeat yourself** — the data layer is one module; the four routes are thin.
+## Tests
 
-## Constraints
+```bash
+pnpm test
+```
 
-- Use this Next.js project. Don't start a new one.
-- Use the supplied UI components in `src/components/ui/`. If you need more, add them from the same library, which is called shadcn. Don't bring in a different one.
-- All data has to come through `src/lib/db.ts`. No queries anywhere else, no numbers pasted into the page or the API.
-- Don't add new top-level dependencies unless you really need to.
-- pnpm only.
-- Node 22.5 or newer (the local database uses Node's built-in `node:sqlite`). `.nvmrc` is provided.
-- The page has to look reasonable on a phone — Dana's at the airport a lot, so 375px wide must work. ArmorHQ logo is at `public/logo.png`. Put it in the header.
+Tests in `src/test/metrics.test.ts` cover the three core metric calculations:
+- `connectRate` — handles zero-total edge case
+- `wowDelta` — handles zero-prior-week baseline
+- `needsAttention` — boundary conditions for the Monday attention list
 
-## The afterlife
+## Stack
 
-After this ships to Dana, our QA team needs to verify the numbers monthly without asking you. **Ship at least one automated test for the metric calculations.** Vitest is set up — `pnpm test` will run it. Pick what's worth testing.
-
-And in three months when an intern takes this over, they'll need to know what you decided and why. Comments where it matters.
+Next.js 15 · React 19 · Tailwind CSS · shadcn/ui · SQLite (`node:sqlite`) · Vitest
